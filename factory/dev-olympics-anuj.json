@@ -1,0 +1,15 @@
+{
+	"name": "dev-olympics-anuj",
+	"properties": {
+		"trustModeClaimForMi": {
+			"value": "Disabled",
+			"editable": true
+		}
+	},
+	"location": "centralindia",
+	"identity": {
+		"type": "SystemAssigned",
+		"principalId": "27c996fe-dc6e-4f91-a746-1aaeb0343b31",
+		"tenantId": "3122aaea-199d-41bd-b70b-2818e3e609a2"
+	}
+}
