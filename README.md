@@ -36,6 +36,36 @@ The solution separates **orchestration, storage, and distributed processing**:
 
 This design provides a foundation for repeatable ingestion, curated datasets, controlled releases, and downstream analytics. Gold-layer analytics, alerting, automated tests, and multi-environment deployment should be described as implemented only when the corresponding assets and configuration are present.
 
+
+
+## Verified implementation snapshot and review findings
+
+The repository contains more than notebooks: it also includes ADF pipeline, dataset, linked-service, and factory JSON artifacts, plus a Databricks curated-pipeline YAML and a generated job-definition Python file. The observations below are based on those committed artifacts, not a live inspection of Azure runtime settings.
+
+### What is represented in the repository
+
+- **ADF `GitToBronze`:** reads a JSON configuration from the lake, iterates over its `value` entries, fetches public GitHub raw CSV URLs, and writes Parquet files to parameterized Bronze destinations. The committed `Resources/param.json` lists athletes, coaches, and events.
+- **ADF `DatalakeIngestion`:** lists items in a configured storage location and has a conditional copy branch for `nocs.csv` into a Bronze NOC folder. The non-matching branch appends file names to an array; the current JSON does not show a subsequent copy activity consuming that array.
+- **Databricks Silver notebooks:** read Bronze Parquet/CSV data, perform entity transformations, and write Delta outputs to Silver storage and tables.
+- **Curated pipeline:** `Olympics_dab/Curated_DLT/Cureted_DLT.yml` defines a pipeline named `Curated_DLT`, configured with catalog `olympics`, schema `gold_cur`, and a workspace notebook path. `Curated_Entities.ipynb` reads Silver tables and defines curated tables/views and data expectations.
+- **Events/coaches job definition:** `Job_Events_&_Coaches.py` defines a task that runs the parameter notebook, then loops over its returned values to invoke the coaches/events notebook with widget parameters.
+
+### High-priority items to verify or fix before calling this production-ready
+
+| Priority | Evidence in committed artifacts | Why it matters / recommended action |
+|---|---|---|
+| **P0 — credentials and configuration hygiene** | The exported ADLS linked-service JSON includes an `encryptedCredential` metadata block; factory JSON includes tenant/principal identifiers; notebooks and datasets contain a fixed storage account URL. | Treat exported credential material as environment-bound. Verify no usable secrets are present in Git history, remove credential payloads from source control where not required, rotate any actual exposed secret, and parameterize account names and paths per environment. |
+| **P1 — ingestion coverage** | `DatalakeIngestion` copies only the matching `nocs.csv` branch; the non-matching branch only appends file names to an array, and no later activity uses that array in the committed pipeline JSON. | If the intent is to copy every file, add and validate the missing dynamic copy path. If NOC-only behavior is intentional, rename/document the pipeline so its scope is clear. |
+| **P1 — rerun safety** | Silver entity notebooks write using `.mode("append")`. | Re-running a notebook can append the same source records again. Define business keys and use a tested overwrite, deduplication, or Delta MERGE strategy appropriate to the data contract. |
+| **P1 — athlete filter semantics** | `Silver_Entity_Atheletes.ipynb` creates `df_filtered` for a list of athletes, but later transformations and the final write use `df` / `df_sorted`, not `df_filtered`. | Confirm whether this is intended exploratory code or a business filter. If filtering is required, make the final data path use the filtered DataFrame and add a test. |
+| **P1 — CDC sequencing** | The curated pipeline calls `dlt.apply_changes` for athletes with key `athelete_id`, SCD type 1, and `sequence_by = col("height")`. | Height is not normally a reliable change sequence because it is not a monotonic update timestamp/version. Use a true source update timestamp or ingestion sequence, and verify the key spelling and source/target schema. |
+| **P1 — workspace-specific deployment** | The DLT YAML and generated job definition reference absolute `/Workspace/Olympics/...` paths; the job script also resets a hardcoded job ID. | These references can fail in another workspace. Move workspace-dependent values into deployment configuration and manage jobs/pipelines as versioned deployable resources. |
+| **P2 — data-quality expectations** | Curated code defines DLT expectations for coach, NOC, and event records, while the athlete change flow has a separate configuration. | Confirm expectations are attached to the intended tables and decide whether each rule should warn, drop invalid records, or fail the pipeline. Monitor dropped/invalid record counts. |
+| **P2 — retry and observability** | ADF pipeline activities currently define zero retries in the committed JSON; the GitHub copy activity logging is configured at warning level with reliable logging disabled. | Select retry policies for transient failures, enable useful diagnostic logging, and add alerts and run-level reconciliation without retrying deterministic schema/permission failures. |
+
+These are static-review findings. They do not prove the current live factory or workspace has the same settings, and they do not mean a suggested fix has already been applied.
+
+
 ## Business problem
 
 Olympic datasets are related but can arrive as separate files with different schemas and quality characteristics. A useful data platform needs to:
@@ -134,11 +164,11 @@ Do not add MERGE or claim incremental loading without confirming the business ke
 
 ## Repository guide
 
-The repository includes these notebook artifacts:
+The repository includes ADF JSON artifacts and these Databricks notebook artifacts:
 
 | File | Purpose suggested by filename |
 |---|---|
-| `Array_Parameter.ipynb` | Array or parameter handling |
+| `Array_Parameter.ipynb` | Returns a list of source/sink/folder parameters for the Databricks job's For Each task |
 | `Curated_Entities.ipynb` | Curated entity processing |
 | `Silver_Entities_Coaches&events.ipynb` | Coaches and events processing |
 | `Silver_Entities_NOCS.ipynb` | NOC processing |
@@ -146,7 +176,7 @@ The repository includes these notebook artifacts:
 
 Filenames are shown as they appear in the repository. Verify notebook paths, exact transformations, source schemas, output paths, and write modes in the code and ADF pipeline configuration.
 
-A production-ready repository can grow to include:
+ADF configuration currently includes `pipeline/DatalakeIngestion.json`, `pipeline/GitToBronze.json`, linked-service and dataset JSON, `factory/dev-olympics-anuj.json`, and `publish_config.json`. Databricks artifacts include `Olympics_dab/Curated_DLT/Cureted_DLT.yml` and `Job_Events_&_Coaches.py`. A production-ready repository can grow to include:
 
 ```text
 .
