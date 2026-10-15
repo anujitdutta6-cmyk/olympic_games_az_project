@@ -1,243 +1,579 @@
-# Olympic Games Data Engineering on Azure
+# Olympic Games Lakehouse on Azure
 
-An Azure data engineering portfolio project for organizing Olympic Games datasets with **Azure Data Factory (ADF)**, **Azure Data Lake Storage Gen2 (ADLS Gen2)**, and **Azure Databricks / Apache Spark**. The repository contains notebooks for parameter handling and entity-level processing, including athletes, coaches, events, NOCs, and curated entities.
+An end-to-end data engineering portfolio project built around **Azure Data Factory (ADF), Azure Data Lake Storage Gen2 (ADLS Gen2), Azure Databricks, Apache Spark, and GitHub-based CI/CD**. The project organizes Olympic Games data into entity-oriented processing flows for athletes, coaches, events, and National Olympic Committees (NOCs).
 
-> **Scope note:** This README documents the workflow suggested by the repository artifacts and established Azure lakehouse patterns. Notebook source alone cannot confirm live ADF activity settings, storage paths, schedules, credentials, permissions, or deployed resources. Verify those items in the Azure portal before describing them as deployed or production-ready.
+> **Implementation accuracy:** The repository contains entity-processing notebook artifacts. The architecture and production deployment sections distinguish the existing project scope from recommended production extensions. A README or notebook alone cannot prove the current state of Azure resources, ADF triggers, identity assignments, monitoring, or deployed CI/CD. Mark a capability as implemented only after verifying it in the Azure portal and repository.
 
 ## Contents
 
-- [Project objectives](#project-objectives)
+- [Executive summary](#executive-summary)
+- [Business problem](#business-problem)
 - [Architecture](#architecture)
 - [End-to-end data flow](#end-to-end-data-flow)
-- [Repository walkthrough](#repository-walkthrough)
+- [Data layers and entity model](#data-layers-and-entity-model)
+- [Repository guide](#repository-guide)
 - [Azure services and responsibilities](#azure-services-and-responsibilities)
 - [Data quality and reliability](#data-quality-and-reliability)
 - [Security and governance](#security-and-governance)
-- [Operations and troubleshooting](#operations-and-troubleshooting)
+- [GitHub workflow and production CI/CD](#github-workflow-and-production-cicd)
+- [Production deployment strategy](#production-deployment-strategy)
+- [Operations, monitoring, and recovery](#operations-monitoring-and-recovery)
+- [Real-world production scenarios](#real-world-production-scenarios)
 - [Runbook](#runbook)
-- [Production-readiness roadmap](#production-readiness-roadmap)
-- [Real-world scenarios](#real-world-scenarios)
-- [Interview preparation](#interview-preparation)
+- [Production-readiness checklist](#production-readiness-checklist)
+- [Interview guide](#interview-guide)
 - [References](#references)
 
-## Project objectives
+## Executive summary
 
-1. Organize Olympic datasets into entities such as athletes, coaches, events, and National Olympic Committees (NOCs).
-2. Use ADF to orchestrate ingestion and processing.
-3. Use ADLS Gen2 as cloud storage for source and processed data.
-4. Transform and curate datasets with Databricks notebooks and Spark.
-5. Separate workflow orchestration from distributed processing.
-6. Establish a foundation for repeatable, observable, maintainable data pipelines.
+The solution separates **orchestration, storage, and distributed processing**:
+
+- **Azure Data Factory** coordinates ingestion and pipeline dependencies.
+- **ADLS Gen2** provides durable cloud storage for source and processed datasets.
+- **Azure Databricks / Apache Spark** performs scalable transformations using notebooks.
+- **Entity-level processing** organizes Olympic data around athletes, coaches, events, and NOCs.
+- **GitHub** provides source control and, in the proposed production model, pull-request checks and deployment automation through GitHub Actions.
+
+This design provides a foundation for repeatable ingestion, curated datasets, controlled releases, and downstream analytics. Gold-layer analytics, alerting, automated tests, and multi-environment deployment should be described as implemented only when the corresponding assets and configuration are present.
+
+## Business problem
+
+Olympic datasets are related but can arrive as separate files with different schemas and quality characteristics. A useful data platform needs to:
+
+1. Land source files reliably and retain a recoverable raw copy.
+2. Process multiple entities without mixing unrelated transformation logic.
+3. validate schema, keys, duplicates, nulls, and entity relationships.
+4. Make reruns safe when a pipeline fails or the same source is received twice.
+5. Track pipeline health and identify which stage failed.
+6. Release code safely without manually editing production notebooks or pipeline definitions.
+
+The project demonstrates the core Azure data engineering pattern. The production design below extends that pattern with environment isolation, validation gates, controlled deployment, and operational recovery.
 
 ## Architecture
 
 ### Logical architecture
 
-**Olympic source datasets → Azure Data Factory → ADLS Gen2 landing/raw storage → Azure Databricks → entity processing and validation → curated/Silver datasets → downstream analytics**
+```mermaid
+flowchart LR
+    A[Olympic source files] --> B[Azure Data Factory]
+    B --> C[ADLS Gen2 - Raw / Bronze]
+    C --> D[Azure Databricks]
+    D --> E[Schema and data-quality checks]
+    E --> F[Curated entity datasets / Silver]
+    F --> G[Downstream analytics or Gold extension]
 
-- **Sources:** Olympic datasets such as athletes, coaches, events, and NOC reference data.
-- **ADF:** Coordinates ingestion and dependencies. Depending on the deployed implementation, this may involve Copy activities, parameters, datasets, linked services, and Databricks activities.
-- **ADLS Gen2:** Stores source and processed files durably.
-- **Databricks:** Runs Spark-based transformations in notebooks.
-- **Curated datasets:** Provide a cleaner, more consistent foundation for analysis and downstream consumption.
+    H[GitHub repository] --> I[Pull request and code review]
+    I --> J[GitHub Actions CI]
+    J --> K[Validated release artifact]
+    K --> L[Environment-approved deployment]
+    L --> B
+    L --> D
+```
 
-This is a logical architecture, not a claim that every component is already deployed or connected. Confirm actual pipeline activities, storage paths, and output formats in your workspaces.
+**How to read this diagram**
 
-### Medallion architecture interpretation
+- The upper path is the data plane: data moves from source files through orchestration and transformation to curated outputs.
+- The lower path is the delivery plane: code changes are reviewed, validated, and deployed independently of normal data processing.
+- The diagram is a target logical architecture. Confirm the actual ADF activities, linked services, storage locations, and CI/CD workflows in the deployed environment before claiming every connection is live.
 
-| Layer | Responsibility | Typical contents |
+### Responsibility boundaries
+
+| Area | Primary responsibility | Avoid using it for |
 |---|---|---|
-| **Bronze / Raw** | Preserve source data with minimal changes | Original Olympic files and ingestion metadata |
-| **Silver / Curated** | Clean, validate, standardize, and relate entities | Curated athletes, coaches, events, and NOC datasets |
-| **Gold / Analytics-ready** | Model business metrics and aggregates | Optional medal summaries, country performance, and event analytics |
+| ADF | Scheduling, dependencies, orchestration, retries, and activity-level monitoring | Replacing Spark for large distributed transformations |
+| ADLS Gen2 | Durable file storage and separation of raw and processed data | Storing secrets or relying on folder names alone as access control |
+| Databricks | Spark transformations, validation, and scalable data processing | Hardcoding environment-specific secrets and paths in notebooks |
+| GitHub | Version control, branches, pull requests, code review, release history | Holding credentials in committed workflow files |
+| GitHub Actions | Automated validation and controlled deployment | Deploying untested changes directly to production |
+| Entra ID / managed identities / service principals | Authentication and authorization | Broad permanent permissions that exceed workload needs |
 
-The repository artifacts indicate entity-level and curated processing. Do not claim a Gold layer is implemented unless you can point to its notebook, table, storage path, or pipeline. Gold is a recommended extension if it is not currently present.
+### Medallion-style data organization
+
+| Layer | Goal | Olympic example | Recommended control |
+|---|---|---|---|
+| **Bronze / Raw** | Preserve received source data | Original athletes, coaches, events, and NOC files | Capture source name, arrival time, and run ID |
+| **Silver / Curated** | Standardize and validate entity data | Cleaned entity datasets with consistent types and keys | Schema checks, deduplication, null rules, relationship checks |
+| **Gold / Analytics-ready** | Serve business metrics and reporting | Medal summaries, participation by country, event trends | Business definitions, aggregation tests, documented refresh rules |
+
+The notebook names indicate entity-level and curated processing. A Gold layer is a recommended extension unless a corresponding implementation can be identified in the repository or workspace. The physical storage format and write mode should be confirmed from notebook code and runtime configuration.
 
 ## End-to-end data flow
 
-1. **Ingestion orchestration — ADF:** Configure source and sink connections, datasets, parameters, and activities to move Olympic data into the lake. ADF coordinates the workflow; it does not replace Spark's distributed transformation engine.
-2. **Landing / raw storage — ADLS Gen2:** Store ingested source data in a clearly named landing or raw location. Preserve original inputs where possible so that transformations can be rerun and data issues investigated.
-3. **Processing — Databricks notebooks:** Run notebooks for parameter handling and entity processing. Use reusable logic and parameterization where supported by the current implementation.
-4. **Entity curation — Silver:** Apply notebook transformations to produce curated entity datasets. Validate schema, required fields, duplicates, and relationships before treating outputs as trusted.
-5. **Consumption:** Use curated outputs for SQL analysis, dashboards, or a future Gold layer. Document a consumer only when it is actually configured.
-6. **Observability:** Track each pipeline run, notebook execution, input/output location, row counts, and failures. Where these controls are not implemented, treat them as production-readiness work.
+1. **Source and ingestion:** Olympic source files are selected for processing. ADF can orchestrate copy/ingestion activities, parameterized datasets, and dependent activities when configured.
+2. **Raw landing:** Store source data in an ADLS Gen2 landing/raw area. Retain the original input where feasible so processing can be repeated and defects investigated.
+3. **Notebook execution:** ADF can invoke Databricks notebooks and pass parameters. The notebook should use those parameters for environment-specific paths and run settings rather than hardcoded values.
+4. **Entity transformation:** Databricks processes the relevant entity—athletes, coaches, events, or NOCs—using Spark transformations.
+5. **Quality gates:** Validate required columns, types, business keys, duplicate policy, null policy, and relationships before promoting output.
+6. **Curated output:** Write the accepted dataset to the configured Silver/curated destination. Use a documented write strategy so reruns have predictable behavior.
+7. **Downstream consumption:** Curated datasets can feed SQL analysis, dashboards, or a future Gold layer. Document a consumer only when it is configured.
+8. **Monitoring and recovery:** Record pipeline run IDs, activity status, row counts, and errors. Retry transient failures, quarantine bad records where appropriate, and rerun only when writes are safe.
 
-## Repository walkthrough
+## Data layers and entity model
 
-The repository includes notebook artifacts with names corresponding to these areas:
+### Entity-oriented processing
 
-| Notebook | Purpose suggested by its name |
+| Entity | Typical data-engineering concerns |
 |---|---|
-| Array_Parameter.ipynb | Array or parameter handling |
-| Curated_Entities.ipynb | Curated entity processing |
-| Silver_Entities_Coaches&events.ipynb | Coaches and events entity processing |
-| Silver_Entities_NOCS.ipynb | NOC entity processing |
-| Silver_Entity_Atheletes.ipynb | Athlete entity processing |
+| Athletes | Stable athlete identifier, required attributes, duplicate profiles, valid country/NOC references |
+| Coaches | Identity consistency, missing attributes, relationships to teams or NOCs where available |
+| Events | Event naming, event identifiers, category consistency, duplicate event rows |
+| NOCs | Standardized country/NOC codes, descriptive attributes, uniqueness, valid joins from other entities |
 
-Notebook filenames are shown as they appear in the repository; spelling and naming can be standardized later. Confirm exact transformations, source paths, schemas, and write modes by reviewing each notebook's code and associated ADF activities.
+These are validation examples, not claims about the exact columns in the source files. Confirm the real schema in the notebook and source data.
+
+### Recommended write semantics
+
+Choose write behavior based on the data contract:
+
+- **Overwrite:** suitable when the destination represents a complete reproducible snapshot and replacement is intentional.
+- **Append:** suitable for immutable new records or event-style data when duplicates are handled.
+- **Upsert / Delta MERGE:** suitable when stable keys and update semantics are defined and the target uses Delta Lake.
+- **Quarantine:** retain malformed or rejected records with a reason and run ID instead of silently dropping them.
+
+Do not add MERGE or claim incremental loading without confirming the business key, change semantics, and target format.
+
+## Repository guide
+
+The repository includes these notebook artifacts:
+
+| File | Purpose suggested by filename |
+|---|---|
+| `Array_Parameter.ipynb` | Array or parameter handling |
+| `Curated_Entities.ipynb` | Curated entity processing |
+| `Silver_Entities_Coaches&events.ipynb` | Coaches and events processing |
+| `Silver_Entities_NOCS.ipynb` | NOC processing |
+| `Silver_Entity_Atheletes.ipynb` | Athlete processing |
+
+Filenames are shown as they appear in the repository. Verify notebook paths, exact transformations, source schemas, output paths, and write modes in the code and ADF pipeline configuration.
+
+A production-ready repository can grow to include:
+
+```text
+.
+├── notebooks/                  # Entity transformation notebooks
+├── tests/                      # Transformation and data-quality tests
+├── adf/                        # Exported ADF artifacts / ARM templates
+├── databricks.yml              # Declarative Automation Bundle, if adopted
+├── resources/                  # Bundle job and pipeline definitions
+├── .github/
+│   └── workflows/              # GitHub Actions validation and deployment
+├── scripts/                    # Validation and deployment helpers
+└── README.md
+```
+
+This is a recommended structure, not a statement that every directory currently exists.
 
 ## Azure services and responsibilities
 
-| Component | Responsibility | What to verify |
+| Service | Role | Validate in the environment |
 |---|---|---|
-| Azure Data Factory | Orchestration and dependency management | Triggers, activities, parameters, linked services, datasets, retry policy |
-| ADLS Gen2 | Durable data storage | Filesystem/container names, folder conventions, hierarchical namespace, lifecycle |
-| Azure Databricks | Spark processing and notebook execution | Workspace, compute policy, notebook paths, job configuration, runtime |
-| Microsoft Entra ID / managed identity | Identity used by Azure services | Actual identity and its role assignments |
-| Unity Catalog, if configured | Governance and access to tables/locations | Catalog, schema, grants, external locations, storage credentials |
+| Azure Data Factory | Orchestration and scheduling | Pipeline activities, dependencies, parameters, triggers, retry/timeout policies |
+| ADLS Gen2 | Source and curated storage | Filesystem/container, paths, hierarchical namespace, permissions, retention |
+| Azure Databricks | Spark notebook execution | Workspace, runtime, notebook paths, job settings, compute policies |
+| Microsoft Entra ID | Identity management | The exact identity used by each workload |
+| Managed identity / service principal | Service-to-service authentication | Role assignments, permissions, credential rotation or federation setup |
+| Unity Catalog, if configured | Data governance | Catalogs, schemas, grants, storage credentials, external locations |
+| Azure Key Vault, if configured | Secret management | Access policies/RBAC and secret references; never commit secret values |
 
-Only describe a component as implemented if it exists in your environment. Unity Catalog, Key Vault, CI/CD, alerts, and a Gold layer are recommendations unless confirmed in the deployed solution.
+**Important:** Workspace access does not automatically grant data-plane access to every ADLS path. Diagnose permissions using the identity actually used by the failing activity or notebook.
 
 ## Data quality and reliability
 
-For a dependable pipeline, validate the following at appropriate boundaries:
+Build quality checks around explicit rules:
 
-- **Schema:** Required columns exist and data types are compatible.
-- **Required values:** Keys and essential business fields are not unexpectedly null.
-- **Uniqueness:** Entity keys do not contain unintended duplicates.
-- **Referential integrity:** Relationships between entities are valid where applicable.
-- **Record reconciliation:** Compare input, accepted, rejected, and output row counts.
-- **Invalid data:** Quarantine malformed records with a reason rather than silently losing them.
-- **Repeatability:** Reruns should not create unintended duplicate records.
-- **Schema changes:** Detect unexpected source-column or data-type changes and decide whether to accept, reject, or quarantine them.
+- **Schema:** required columns exist and data types are compatible.
+- **Completeness:** mandatory keys and business attributes are not unexpectedly null.
+- **Uniqueness:** entity keys do not contain unintended duplicates.
+- **Validity:** values conform to known formats or allowed domains.
+- **Referential integrity:** joins between entities do not unexpectedly lose records.
+- **Reconciliation:** compare source, accepted, rejected, and output counts.
+- **Schema drift:** detect new, removed, or incompatible columns and decide whether to accept, reject, or quarantine them.
+- **Idempotency:** retries do not create unintended duplicates or corrupt prior output.
+- **Auditability:** capture run ID, source file, processing time, status, counts, and error details.
 
-These are recommended controls. Clearly identify which checks are already implemented in code.
+Treat these as production controls to implement and test; do not imply that a control is already present unless the code or environment demonstrates it.
 
 ## Security and governance
 
-- Use managed identities or service principals where supported, with least-privilege access.
-- Grant storage access to the identity actually used by the pipeline or Databricks compute. Do not assume the workspace identity is automatically used for every operation.
-- Keep credentials, tokens, connection strings, and secrets out of notebooks and Git history. Use Key Vault or an approved secret-management mechanism where appropriate.
-- Use Unity Catalog permissions and governed storage locations if Unity Catalog is part of the workspace design.
-- Separate development and production resources and permissions for a production implementation.
-- Do not commit private data, subscription identifiers, account keys, or exported credentials.
+1. Use managed identity or a dedicated service principal where supported.
+2. Apply least privilege to storage, workspace, deployment, and production resources.
+3. Keep tokens, client secrets, connection strings, and account keys out of notebooks and Git history.
+4. Prefer GitHub Actions OIDC/workload identity federation when the Azure and Databricks identity configuration supports it, avoiding long-lived credentials in repository secrets.
+5. Separate development and production workspaces/resources and restrict who can deploy to production.
+6. Use protected GitHub environments, required reviewers, branch protection, and limited workflow permissions.
+7. Store sensitive operational settings in approved secret stores; use GitHub environment variables only for non-secret configuration.
+8. Audit identity and permission changes and review them periodically.
 
-## Operations and troubleshooting
+## GitHub workflow and production CI/CD
 
-| Symptom | Likely area to inspect | Practical check |
+This section describes a **recommended deployment model**, not a claim that GitHub Actions workflows are already configured in this repository. It intentionally uses GitHub and GitHub Actions—not Azure DevOps.
+
+### Branching and promotion strategy
+
+```mermaid
+flowchart TD
+    A[Issue or change request] --> B[Feature branch]
+    B --> C[Notebook and pipeline changes]
+    C --> D[Pull request]
+    D --> E[Automated checks]
+    E --> F{Checks pass?}
+    F -- No --> B
+    F -- Yes --> G[Peer review and approval]
+    G --> H[Merge to main]
+    H --> I[Build immutable release]
+    I --> J[Deploy to DEV / integration]
+    J --> K[Smoke tests and data-quality checks]
+    K --> L{Release approved?}
+    L -- No --> M[Fix or roll back]
+    L -- Yes --> N[Protected production environment]
+    N --> O[Deploy to PROD]
+    O --> P[Health checks and monitoring]
+```
+
+**Suggested branch policy**
+
+- `feature/*`: isolated development.
+- Pull request into `main`: review, static checks, notebook validation, and automated tests.
+- `main`: integration-ready code; production deployment should still pass explicit environment and approval gates.
+- Release tags such as `v1.0.0`: optional immutable release markers for traceability.
+
+For a small portfolio, keep the workflow proportionate. Introduce staging and manual production approval before using real production data or schedules.
+
+### CI: validate before deployment
+
+Recommended pull-request checks:
+
+1. Validate JSON syntax for exported notebook and pipeline files.
+2. Confirm notebooks are parseable and do not contain accidentally committed credentials.
+3. Run Python unit tests for reusable transformation functions where practical.
+4. Run data-quality tests against small, synthetic fixtures.
+5. Validate the Databricks bundle configuration if the project adopts Declarative Automation Bundles.
+6. Review changes to ADF pipeline definitions and environment-specific parameters.
+7. Block deployment when validation fails.
+
+Not every notebook can be meaningfully tested without a Spark runtime and representative input. Separate fast static checks from integration tests that require Azure resources.
+
+### CD: deploy ADF and Databricks as separate asset types
+
+**ADF deployment path**
+
+- Keep ADF JSON definitions and the required deployment templates in version control.
+- Validate the exported ADF artifacts.
+- Deploy the approved template to the target factory using an authenticated Azure deployment step.
+- Supply environment-specific values at deployment time instead of embedding development resource names in the template.
+- Handle triggers deliberately during releases: stop only the affected triggers when required, deploy, verify, and restart them after a successful release.
+- Run a post-deployment smoke test and check pipeline status.
+
+ADF artifact export and template generation must match the actual repository setup. Do not assume that notebook files alone are a deployable ADF release.
+
+**Databricks deployment path**
+
+- Keep notebook/source code and job or pipeline definitions under version control.
+- For a bundle-based deployment, define resources and targets in `databricks.yml`.
+- Run bundle validation before deployment.
+- Deploy to a development or integration target first; run tests and a smoke test.
+- Promote the same reviewed source revision to production with production-specific configuration.
+- Prefer workload identity federation/OIDC with a dedicated deployment service principal over a user's personal access token where supported.
+- Use least-privilege workspace permissions and protected GitHub environments.
+
+Databricks Declarative Automation Bundles are a recommended way to define and deploy supported Databricks resources as code. If the project uses notebooks only today, bundle adoption is a production enhancement rather than an existing capability.
+
+### GitHub Actions workflow outline
+
+The following is an **illustrative pipeline design**, not a ready-to-run workflow for this repository. Before enabling deployment, add and validate the actual ADF artifacts, Databricks bundle, target workspace settings, Azure federation configuration, and tests.
+
+```yaml
+name: Olympic Lakehouse CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate notebook JSON
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          notebooks = list(Path(".").rglob("*.ipynb"))
+          for path in notebooks:
+              with path.open(encoding="utf-8") as file:
+                  notebook = json.load(file)
+              assert "cells" in notebook, f"Invalid notebook: {path}"
+          print(f"Validated {len(notebooks)} notebook files")
+          PY
+
+      - name: Run unit tests
+        run: |
+          if [ -d tests ]; then
+            python -m pip install pytest
+            pytest -q
+          else
+            echo "No tests directory found; add automated tests before production promotion."
+          fi
+```
+
+This validation example intentionally does not deploy anything. A production workflow should add separate deployment jobs that use OIDC, environment-specific approval, and the real project artifacts. Pin third-party actions to full commit SHAs in a hardened production workflow and update those pins through a controlled process.
+
+### Production release controls
+
+| Control | Why it matters |
+|---|---|
+| Protected main branch | Prevents unreviewed changes from becoming release candidates |
+| Required CI checks | Stops invalid code or configuration before deployment |
+| Environment approval | Makes production releases explicit and auditable |
+| OIDC / workload federation | Reduces dependence on long-lived secrets |
+| Immutable commit or tag | Makes the deployed version traceable |
+| Dev/integration smoke test | Catches configuration and permission failures early |
+| Post-deployment health check | Confirms that deployed resources can execute |
+| Rollback plan | Defines how to restore a known-good version |
+| Deployment concurrency control | Avoids overlapping releases modifying the same resources |
+| Audit trail | Connects PR, commit, workflow run, deployment, and pipeline run |
+
+### Rollback strategy
+
+- **Code rollback:** redeploy the last known-good commit or release artifact.
+- **ADF rollback:** redeploy the last validated factory template and restore the intended trigger state.
+- **Databricks rollback:** redeploy the last known-good bundle/source revision.
+- **Data rollback:** code rollback alone does not restore changed data. Use a deliberate recovery plan—such as rerunning from retained raw data, restoring a known-good Delta version where applicable, or rebuilding affected curated outputs.
+- **After rollback:** verify data quality, output counts, pipeline health, and downstream consumers before resuming normal schedules.
+
+## Production deployment strategy
+
+### Environment separation
+
+| Concern | Development | Test / integration | Production |
+|---|---|---|---|
+| Purpose | Fast iteration | Validate end-to-end behavior | Serve trusted workloads |
+| Data | Synthetic or limited sample | Representative and controlled | Approved operational data |
+| Deployment | Feature branches and PR checks | Automated candidate deployment | Protected approval gate |
+| Identity | Developer or dev workload identity | Dedicated test identity | Dedicated least-privilege identity |
+| Triggers | Manual or limited | Controlled test schedule | Explicitly approved schedule |
+| Monitoring | Developer feedback | Release validation | Alerts, runbooks, audit history |
+
+Use configuration per environment for workspace host, factory name, storage paths, catalog/schema, compute settings, and schedule. Keep secrets out of source control. Avoid promoting a developer's workspace state manually as the release process.
+
+### Production-grade pipeline pattern
+
+1. **Ingest:** ADF starts the run and records a run identifier.
+2. **Land:** source files are retained in the raw area.
+3. **Validate:** verify file presence, schema, and basic record counts.
+4. **Transform:** Databricks processes the required entities.
+5. **Quality gate:** validate keys, duplicates, required fields, relationships, and reconciliation.
+6. **Publish:** update curated destinations only after required checks pass.
+7. **Observe:** record metrics, errors, and duration; notify the appropriate owner when a run fails.
+8. **Recover:** rerun from a known checkpoint or raw input using idempotent write behavior.
+9. **Release safely:** source changes pass CI, are deployed to a lower environment, and receive approval before production promotion.
+
+### Performance and cost controls
+
+- Use job-oriented compute and auto-termination where suitable; avoid leaving interactive compute running unnecessarily.
+- Select only required columns and filter early when semantically correct.
+- Avoid collecting large datasets to the driver.
+- Inspect Spark plans and execution metrics before changing partitioning or cluster size.
+- Avoid blindly increasing workers or shuffle partitions.
+- Use retry policies for transient failures, not to mask deterministic schema or permission errors.
+- Schedule pipelines according to data arrival and business need.
+- Review Azure Cost Management for Databricks compute, storage, networking, and other resources.
+- Use lifecycle policies for retained files only after defining audit and recovery requirements.
+
+## Operations, monitoring, and recovery
+
+| Symptom | Investigate | Response |
 |---|---|---|
-| ADF activity cannot connect | Linked service, integration runtime, network, identity | Inspect the activity error and validate connectivity and authentication |
-| Databricks cannot read a storage path | Path, storage permissions, credential configuration | Confirm the ABFSS path, filesystem/container, and identity's data-plane permissions |
-| Access denied while writing | Storage role assignment or ACL | Check required role assignments and directory/file ACLs for the actual identity |
-| Spark schema/type mismatch | Source schema drift or incompatible file types | Inspect the failing column's physical type and Spark schema; apply explicit, justified casting |
-| Duplicate records after rerun | Append/write strategy or missing key logic | Define a stable business key and select a safe overwrite, deduplication, or merge strategy |
-| Pipeline succeeds but output is missing | Sink path, conditional branch, notebook behavior | Verify activity inputs/outputs and confirm the expected target location |
-| Unexpectedly high cloud cost | Compute uptime, job triggers, networking, storage | Inspect Cost Analysis, schedules, compute configuration, and idle resources |
+| ADF cannot connect to a source or sink | Linked service, integration runtime, network, identity | Inspect activity error details; validate connectivity and authentication |
+| Databricks cannot read ADLS | ABFSS path, filesystem, credential, role/ACL | Identify the runtime identity and verify required data access |
+| Write returns access denied | Data-plane role assignment or directory ACL | Grant only the required access to the correct identity |
+| Parquet/Spark type mismatch | Physical file type, inferred schema, schema drift | Inspect the failing column; apply explicit, justified casts or a controlled schema |
+| Duplicate output after retry | Append semantics, missing key, non-deterministic transformation | Define a business key and make writes idempotent |
+| Pipeline succeeds but output is missing | Sink path, conditions, notebook parameters, write mode | Compare activity inputs/outputs and verify the target path |
+| One entity fails while others succeed | Dependencies, per-entity validation, error handling | Isolate the failed entity and define whether the whole release must fail |
+| Unexpected cloud spend | Idle compute, triggers, networking, storage | Inspect Cost Management, job schedules, compute state, and network resources |
+| Deployment succeeds but run fails | Runtime permissions, parameters, artifact paths | Run a smoke test using the deployed identity and configuration |
 
-Start with the exact failing activity or notebook error. Avoid broad permission changes or deleting resources as a first troubleshooting step.
+For each production run, aim to capture: pipeline run ID, commit/release ID, start/end time, source files, row counts, rejected counts, output destination, status, and actionable error details.
+
+## Real-world production scenarios
+
+### Scenario 1 — A source file introduces a new column
+
+**Risk:** transformation failure or silent loss of information.
+
+**Response:** preserve the raw file, detect schema drift, compare the incoming schema with the expected contract, and explicitly accept, transform, or quarantine the change. Add a regression test for the new schema.
+
+### Scenario 2 — The same file is delivered twice
+
+**Risk:** duplicate athletes, events, or inflated metrics.
+
+**Response:** record file identity or a suitable source key, define the business key and write semantics, deduplicate deterministically, and make reruns idempotent. Use Delta MERGE only when supported by the target model and defined key logic.
+
+### Scenario 3 — A failure occurs after raw ingestion but before curation
+
+**Risk:** the next run repeats work or publishes incomplete output.
+
+**Response:** keep stages observable, retain raw inputs, use explicit ADF dependency conditions, and publish curated outputs only after validation passes. Ensure the downstream stage can be safely rerun.
+
+### Scenario 4 — NOC and athlete records do not match
+
+**Risk:** records disappear in joins or reporting shows incorrect country attribution.
+
+**Response:** measure unmatched keys and join cardinality, validate code formats, retain or quarantine unmatched rows according to a documented policy, and fail the quality gate when agreed thresholds are exceeded.
+
+### Scenario 5 — A production deployment changes notebook parameters
+
+**Risk:** production reads development data or writes to the wrong storage path.
+
+**Response:** parameterize environment settings, validate required parameters, use protected environment configuration, and perform a post-deployment smoke test against the expected workspace and storage destination.
+
+### Scenario 6 — A GitHub Actions deployment credential is exposed
+
+**Risk:** unauthorized changes to data resources.
+
+**Response:** prefer OIDC/workload federation, minimize workflow permissions, use a dedicated service principal, rotate/revoke any exposed credential, review audit logs, and investigate the affected resources. Never commit credentials to repair a pipeline.
+
+### Scenario 7 — A production release passes CI but fails at runtime
+
+**Risk:** syntax tests pass while real Azure permissions or data shape are incompatible.
+
+**Response:** deploy to an integration environment first, run a representative integration test and a small data-quality check, verify runtime identity and parameters, and block production promotion until the release passes.
+
+### Scenario 8 — Processing volume grows significantly
+
+**Risk:** longer runtime, skew, memory pressure, and increased cost.
+
+**Response:** inspect Spark execution metrics, skew, shuffle volume, file sizes, and query plans. Optimize based on measurements, and define service-level expectations for runtime and freshness.
 
 ## Runbook
 
-Adapt this runbook to the actual resource names and pipeline design.
+### Before a run
 
-### Prerequisites
+1. Verify source availability and expected file names.
+2. Confirm ADF parameters, linked services, and target paths.
+3. Confirm the correct identity has required storage and workspace permissions.
+4. Verify the target write mode and whether the run is safe to retry.
+5. Check that the intended environment is selected.
 
-- Azure subscription permissions for the relevant resource group.
-- Access to Azure Data Factory, ADLS Gen2, and Azure Databricks.
-- Required source data and permission to read it.
-- Correct identity and permissions for ADF and Databricks to access storage.
+### After a run
 
-### Execute and validate
+1. Inspect ADF activity status and notebook output.
+2. Confirm expected output files or tables exist.
+3. Compare source, accepted, rejected, and output row counts.
+4. Check schema, key uniqueness, and required fields.
+5. Review warnings, failures, and processing duration.
+6. Record the run result and release/commit reference.
+7. Investigate failed quality gates before promoting data to downstream consumers.
 
-1. Review the ADF pipeline and confirm source, sink, parameters, and dependencies.
-2. Confirm the expected source files exist in the configured location.
-3. Start a debug or manual pipeline run in a non-production environment.
-4. Review every activity's status and input/output details.
-5. Confirm the Databricks notebook ran successfully and wrote to the expected location.
-6. Validate output schema, row counts, key uniqueness, and sample records.
-7. Confirm a second run behaves as intended and does not introduce duplicate data.
-8. Record the outcome, rejected records, warnings, and follow-up actions.
+### Recovery
 
-### Deployment guidance
+1. Identify the failed stage and determine whether it is a code, data, permission, network, or compute issue.
+2. Preserve error details and the original source input.
+3. Decide whether a retry is safe; do not repeatedly retry deterministic failures.
+4. Fix the underlying issue and validate the change in a lower environment.
+5. Rerun the smallest safe scope.
+6. Reconcile outputs and notify affected consumers if published data was incomplete.
 
-For a team or production workflow, keep notebooks and pipeline definitions in version control, separate environments, deploy through a reviewed release process, and test changes against a small representative dataset before a full run.
+## Production-readiness checklist
 
-## Production-readiness roadmap
-
-The following items are suggested improvements, not assertions about the current implementation.
-
+### Data platform
 - [ ] Document exact ADF pipeline names, activity dependencies, triggers, and parameters.
-- [ ] Document storage filesystem/container and folder paths for each layer.
-- [ ] Add schema, null, uniqueness, and referential-integrity checks.
-- [ ] Add run-level audit metadata: run ID, start/end time, status, row counts, and error details.
-- [ ] Define retry, timeout, failure handling, and alerting rules.
-- [ ] Make reruns safe and document the incremental/full-load strategy.
-- [ ] Store secrets securely and apply least-privilege access.
-- [ ] Add automated tests for transformation rules and representative data.
-- [ ] Establish dev/test/prod configuration and CI/CD.
-- [ ] Review compute sizing, auto-termination, scheduling, and cloud costs.
-- [ ] Add a Gold/analytics layer only if there is a clear downstream reporting requirement.
+- [ ] Document raw and curated paths, file formats, and schema contracts.
+- [ ] Add schema, null, uniqueness, relationship, and reconciliation checks.
+- [ ] Define write semantics, deduplication, and idempotent rerun behavior.
+- [ ] Add run-level audit metadata and failure alerts.
+- [ ] Define retry, timeout, quarantine, and recovery rules.
 
-## Real-world scenarios
+### Security
+- [ ] Confirm the exact identity used by each workload.
+- [ ] Apply least-privilege storage and workspace permissions.
+- [ ] Remove secrets from source code and Git history.
+- [ ] Configure approved secret management and/or workload federation.
+- [ ] Separate production access from developer access.
 
-### Scenario 1 — A source file arrives with new columns
+### GitHub CI/CD
+- [ ] Add protected branches and required pull-request checks.
+- [ ] Add notebook/configuration validation and automated tests.
+- [ ] Keep ADF deployment artifacts and Databricks definitions versioned.
+- [ ] Define environment-specific configuration without hardcoded secrets.
+- [ ] Use GitHub Actions with minimal permissions and OIDC where supported.
+- [ ] Protect production environment with approval rules.
+- [ ] Add deployment smoke tests, auditability, and rollback procedures.
+- [ ] Test the full workflow in a non-production environment before production use.
 
-**Risk:** A transformation fails or silently drops new information.
+### Operations and cost
+- [ ] Configure useful run monitoring and actionable alerts.
+- [ ] Review compute sizing, auto-termination, schedules, and storage lifecycle.
+- [ ] Define expected data freshness and acceptable run duration.
+- [ ] Test recovery from a failed transformation and a failed deployment.
 
-**Approach:** Detect schema drift, preserve the raw source, validate the changed schema, and explicitly decide whether to accept or quarantine new fields. Avoid blindly casting every column.
+## Interview guide
 
-### Scenario 2 — The same data is processed twice
-
-**Risk:** Duplicate records or inflated business metrics.
-
-**Approach:** Define the business key and load semantics. Use deterministic deduplication and an idempotent write pattern. Use Delta Lake MERGE only when the target model and key logic support it.
-
-### Scenario 3 — Athlete and event datasets disagree
-
-**Risk:** Invalid joins and misleading reports.
-
-**Approach:** Validate join keys, check unmatched records, measure join cardinality, and decide whether unmatched records should be quarantined or retained with an explicit status.
-
-### Scenario 4 — A pipeline fails after raw ingestion
-
-**Risk:** A rerun starts from the wrong point or repeats work.
-
-**Approach:** Keep stages independently observable, preserve raw inputs, and make downstream writes rerunnable. Use ADF dependency conditions and retry settings deliberately.
-
-### Scenario 5 — The pipeline must support larger datasets
-
-**Risk:** Long runtimes, memory pressure, and unnecessary compute cost.
-
-**Approach:** Inspect Spark execution plans and data skew, avoid unnecessary collect operations, select only needed columns, filter early when correct, and tune partitioning based on measured data size rather than arbitrary partition counts.
-
-## Interview preparation
-
-Use these answers as a framework and adapt them to what you actually implemented.
+Use these responses as a starting point. Keep your answers tied to the features you have actually implemented; identify proposed controls as future improvements.
 
 **Q: Why use ADF and Databricks together?**  
-ADF coordinates ingestion, dependencies, scheduling, and monitoring. Databricks provides distributed Spark compute for transformations. This separates orchestration from data processing.
+ADF handles orchestration, dependencies, scheduling, and activity monitoring. Databricks runs distributed Spark transformations. This separates workflow coordination from compute-intensive processing.
 
-**Q: What is the role of ADLS Gen2?**  
-It is the durable storage layer for source and processed data. A well-organized lake supports independent compute and reprocessing when raw data is retained.
+**Q: What is ADLS Gen2's role?**  
+It is the durable storage layer for source and processed data. Retaining raw input makes investigations and reprocessing easier.
 
 **Q: Explain Bronze, Silver, and Gold.**  
-Bronze preserves source data, Silver applies quality and consistency rules, and Gold presents business-oriented models or aggregates. The layers are logical quality boundaries; their physical implementation depends on the project.
+Bronze preserves incoming data, Silver standardizes and validates it, and Gold organizes data for business reporting. They are logical quality boundaries; the actual implementation depends on the project's assets.
 
-**Q: How do you make a pipeline idempotent?**  
-Define the key and load semantics, make writes deterministic, and ensure a retry or rerun does not duplicate data or corrupt existing results. The implementation might use overwrite, deduplication, checkpoints, or MERGE, depending on the source and target.
+**Q: How would you make the pipeline idempotent?**  
+Define the business key and load contract, make transformations deterministic, and select an appropriate overwrite, deduplication, or upsert strategy. Verify that reruns do not create duplicates or corrupt output.
 
 **Q: How do you handle schema evolution?**  
-Detect changes, preserve the source, validate compatibility, and explicitly accept, transform, or quarantine changes. Schema evolution should be governed rather than enabled without review.
+Detect changes, preserve the source, validate compatibility, and decide explicitly whether to accept, transform, or quarantine the new schema. Add tests for the changed contract.
 
-**Q: How do you troubleshoot a storage permission error?**  
-Identify the exact identity used by the failing operation, verify the storage path and network route, then check the required data-plane role assignment and ACLs. Workspace access alone does not guarantee file access.
+**Q: How would you deploy ADF and Databricks with GitHub?**  
+Use feature branches and pull requests. Run automated validation and tests before merging. Deploy versioned ADF templates and Databricks resources through GitHub Actions, use environment-specific configuration, authenticate with OIDC/workload federation where supported, and protect production with approvals and smoke tests.
 
-**Q: How do you measure data quality?**  
-Use measurable rules such as required-field completeness, uniqueness, accepted-value constraints, referential integrity, and source-to-target reconciliation. Track rejected records and quality trends over time.
+**Q: Why not deploy directly from a developer's workspace?**  
+Manual workspace changes are difficult to reproduce and audit. Versioned assets and a controlled deployment pipeline make releases traceable, repeatable, and easier to roll back.
 
-**Q: How would you productionize this project?**  
-Add configuration by environment, managed identity and least privilege, monitoring and alerts, data-quality gates, repeatable deployments, automated tests, documented recovery steps, and cost controls.
+**Q: How do you secure CI/CD?**  
+Use a dedicated least-privilege deployment identity, short-lived federation where supported, protected environments, minimal workflow permissions, secret management, and audit logs. Avoid personal access tokens or long-lived credentials where a supported federated approach is available.
 
-**Interview honesty tip:** Separate what is implemented in this repository from what you would add in production. Be ready to point to the notebook, ADF activity, storage location, or configuration that supports each claim.
+**Q: What is the difference between CI and CD here?**  
+CI validates code and configuration on pull requests. CD deploys an approved version to a target environment and verifies the deployed resources. Data pipeline execution and software deployment are related but distinct workflows.
+
+**Q: What happens if deployment succeeds but data processing fails?**  
+Deployment success only proves that resources were deployed. Check the runtime identity, parameters, source schema, permissions, and activity logs; fix the issue, rerun safely, and validate output before declaring the release healthy.
+
+**Q: How would you reduce production cost?**  
+Measure compute and job duration, use appropriate job compute and auto-termination, avoid unnecessary data scans and shuffles, tune only from execution evidence, and review schedules and Azure Cost Management.
+
+**Q: What would you improve next in this project?**  
+I would prioritize data-quality gates, run-level audit metadata, safe reruns, automated tests, separate environment configuration, GitHub Actions deployment, least-privilege identity, production alerts, and a tested recovery plan.
+
+**Interview tip:** Explain the actual data flow first, then discuss the operational risk it solves. Distinguish implemented behavior from the production extension you would build next.
 
 ## References
 
-- [Azure Data Factory — overview and concepts](https://learn.microsoft.com/en-us/azure/data-factory/introduction)
-- [Azure Architecture Center — design a medallion lakehouse with Azure Data Factory](https://learn.microsoft.com/en-us/azure/architecture/databases/architecture/azure-data-factory-on-azure-landing-zones-index)
-- [Azure Databricks — medallion lakehouse architecture](https://learn.microsoft.com/en-us/azure/databricks/lakehouse/medallion)
-- [Azure Databricks — architecture overview](https://learn.microsoft.com/en-us/azure/databricks/getting-started/architecture)
-- [Tutorial video reference](https://youtu.be/ESWqAZP2qA4)
+- [Azure Data Factory overview](https://learn.microsoft.com/en-us/azure/data-factory/introduction)
+- [Run a Databricks notebook from ADF](https://learn.microsoft.com/en-us/azure/data-factory/transform-data-using-databricks-notebook)
+- [Azure Databricks CI/CD overview](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/ci-cd)
+- [Databricks GitHub Actions guidance](https://docs.databricks.com/aws/en/dev-tools/ci-cd/github)
+- [Azure Databricks service principals for CI/CD](https://learn.microsoft.com/en-us/azure/databricks/dev-tools/auth/service-principals)
+- [ADF continuous integration and delivery](https://learn.microsoft.com/en-us/azure/data-factory/continuous-integration-delivery)
+- [Reference video](https://youtu.be/ESWqAZP2qA4)
 
 ---
 
-**Project status:** Portfolio / learning project. Validate live Azure configuration and mark optional production controls as implemented only after confirming them in the workspace.
+**Project status:** Azure data engineering portfolio project. Confirm live resource configuration and deployment automation before describing them as production-deployed.
