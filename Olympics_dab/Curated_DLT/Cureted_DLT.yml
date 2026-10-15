@@ -1,0 +1,15 @@
+resources:
+  pipelines:
+    pipeline_curated_dlt:
+      name: Curated_DLT
+      libraries:
+        - notebook:
+            path: /Workspace/Olympics/Curated_Entities
+      schema: gold_cur
+      continuous: false
+      development: false
+      photon: true
+      channel: CURRENT
+      catalog: olympics
+      serverless: true
+      root_path: /Workspace/Olympics/Curated_DLT
